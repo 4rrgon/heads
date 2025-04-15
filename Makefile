@@ -189,11 +189,11 @@ $(shell mkdir -p "$(initrd_lib_dir)" "$(initrd_bin_dir)" "$(initrd_data_dir)")
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -o pipefail -c
 
-# Include the musl-cross module early so that $(CROSS) will
+# Include the musl-cross-make module early so that $(CROSS) will
 # be defined prior to any other module.
-include modules/musl-cross
+include modules/musl-cross-make
 
-musl_dep	:= musl-cross
+musl_dep	:= musl-cross-make
 target		:= $(shell echo $(CROSS) | grep -Eoe '([^/]*?)-linux-musl')
 arch		:= $(subst -linux-musl, , $(target))
 heads_cc	:= $(CROSS)gcc \
@@ -231,9 +231,9 @@ ifeq ($(CONFIG_COREBOOT), y)
 # Legacy flash boards don't generate an update package, the only purpose of
 # those boards is to be flashed over vendor firmware via an exploit.
 ifneq ($(CONFIG_LEGACY_FLASH), y)
-# talos-2 builds its own update package, which is not integrated with the ZIP
-# method currently
-ifneq ($(BOARD), talos-2)
+# Boards containing 'talos-2' build their own update package, which is not integrated with the ZIP method currently
+ifneq ($(findstring talos-2, $(BOARD)),)
+else
 # Coreboot targets create an update package that can be applied with integrity
 # verification before flashing (see flash-gui.sh).  The ZIP package format
 # allows other metadata that might be needed to added in the future without
@@ -245,7 +245,14 @@ $(board_build)/$(CB_UPDATE_PKG_FILE): $(board_build)/$(CB_OUTPUT_FILE)
 	cd "$(board_build)/update_pkg" && sha256sum "$(CB_OUTPUT_FILE)" >sha256sum.txt
 	cd "$(board_build)/update_pkg" && zip -9 "$@" "$(CB_OUTPUT_FILE)" sha256sum.txt
 
+# Only add the hash and size if split_8mb4mb.mk is not included
+ifeq ($(wildcard split_8mb4mb.mk),)
 all: $(board_build)/$(CB_OUTPUT_FILE) $(board_build)/$(CB_UPDATE_PKG_FILE)
+	@sha256sum $(board_build)/$(CB_OUTPUT_FILE) | tee -a "$(HASHES)"
+	@stat -c "%8s:%n" $(board_build)/$(CB_OUTPUT_FILE) | tee -a "$(SIZES)"
+else
+all: $(board_build)/$(CB_OUTPUT_FILE) $(board_build)/$(CB_UPDATE_PKG_FILE)
+endif
 endif
 endif
 
@@ -393,27 +400,33 @@ define define_module =
 	#      module-specific cleanup action to get rid of it.
     $(build)/$($1_base_dir)/.canary: FORCE
 	if [ ! -e "$$@" ]; then \
+		echo "INFO: .canary file not found. Cloning repository $($1_repo) into $(build)/$($1_base_dir)"; \
 		git clone $($1_repo) "$(build)/$($1_base_dir)"; \
+		echo "INFO: Resetting repository to commit $($1_commit_hash)"; \
 		git -C "$(build)/$($1_base_dir)" reset --hard $($1_commit_hash); \
+		echo "INFO: Creating .canary file with repo and commit hash"; \
 		echo -n '$($1_repo)|$($1_commit_hash)' > "$$@"; \
 	elif [ "$$$$(cat "$$@")" != '$($1_repo)|$($1_commit_hash)' ]; then \
-		echo "Switching $1 to $($1_repo) at $($1_commit_hash)" && \
+		echo "INFO: Canary file differs. Switching $1 to $($1_repo) at $($1_commit_hash)"; \
 		git -C "$(build)/$($1_base_dir)" reset --hard HEAD^ && \
-		echo "git fetch $($1_repo) $($1_commit_hash) --recurse-submodules=no" && \
+		echo "INFO: Fetching commit $($1_commit_hash) from $($1_repo) (without recursing submodules)"; \
 		git -C "$(build)/$($1_base_dir)" fetch $($1_repo) $($1_commit_hash) --recurse-submodules=no && \
-		echo "git reset --hard $($1_commit_hash)" && \
-		git -C "$(build)/$($1_base_dir)" reset --hard $($1_commit_hash) && \
-		echo "git clean" && \
+		echo "INFO: Resetting repository to commit $($1_commit_hash)"; \
+		git -C "$(build)/$($1_base_dir)" reset --hard $($1_commit_hash); \
+		echo "INFO: Cleaning repository directory (including payloads and util/cbmem)"; \
 		git -C "$(build)/$($1_base_dir)" clean -df && \
 		git -C "$(build)/$($1_base_dir)" clean -dffx payloads util/cbmem && \
-		echo "git submodule sync" && \
+		echo "INFO: Synchronizing submodules"; \
 		git -C "$(build)/$($1_base_dir)" submodule sync && \
-		echo "git submodule update" && \
+		echo "INFO: Updating submodules (init and checkout)"; \
 		git -C "$(build)/$($1_base_dir)" submodule update --init --checkout && \
+		echo "INFO: Updating .canary file with new repo info"; \
 		echo -n '$($1_repo)|$($1_commit_hash)' > "$$@"; \
 	fi
 	if [ ! -e "$(build)/$($1_base_dir)/.patched" ]; then \
+		echo "INFO: .patched file not found. Beginning patch application for $1"; \
 		if [ -r patches/$($1_patch_name).patch ]; then \
+			echo "INFO: Found patch file patches/$($1_patch_name).patch. Applying patch..."; \
 			( git apply --verbose --reject --binary --directory build/$(CONFIG_TARGET_ARCH)/$($1_base_dir) ) \
 				< patches/$($1_patch_name).patch \
 				|| exit 1 ; \
@@ -427,6 +440,7 @@ define define_module =
 					|| exit 1 ; \
 			done ; \
 		fi && \
+		echo "INFO: Patches applied successfully. Creating .patched file"; \
 		touch "$(build)/$($1_base_dir)/.patched"; \
 	fi
   else
@@ -561,8 +575,8 @@ endef
 
 $(call map, define_module, $(modules-y))
 
-# hack to force musl-cross to be built before musl
-#$(build)/$(musl_dir)/.configured: $(build)/$(musl-cross_dir)/../../crossgcc/x86_64-linux-musl/bin/x86_64-musl-linux-gcc
+# hack to force musl-cross-make to be built before musl
+#$(build)/$(musl_dir)/.configured: $(build)/$(musl-cross-make_dir)/../../crossgcc/x86_64-linux-musl/bin/x86_64-musl-linux-gcc
 
 #
 # Install a file into the initrd, if it changed from
@@ -599,11 +613,12 @@ endef
 
 # Only some modules have binaries that we install
 # Shouldn't this be specified in the module file?
-#bin_modules-$(CONFIG_MUSL) += musl-cross
+#bin_modules-$(CONFIG_MUSL) += musl-cross-make
 bin_modules-$(CONFIG_KEXEC) += kexec
 bin_modules-$(CONFIG_TPMTOTP) += tpmtotp
 bin_modules-$(CONFIG_PCIUTILS) += pciutils
 bin_modules-$(CONFIG_FLASHROM) += flashrom
+bin_modules-$(CONFIG_FLASHPROG) += flashprog
 bin_modules-$(CONFIG_CRYPTSETUP) += cryptsetup
 bin_modules-$(CONFIG_CRYPTSETUP2) += cryptsetup2
 bin_modules-$(CONFIG_GPG) += gpg
@@ -658,7 +673,7 @@ endif
 $(COREBOOT_UTIL_DIR)/cbmem/cbmem \
 $(COREBOOT_UTIL_DIR)/superiotool/superiotool \
 $(COREBOOT_UTIL_DIR)/inteltool/inteltool \
-: $(build)/$(coreboot_base_dir)/.canary musl-cross
+: $(build)/$(coreboot_base_dir)/.canary musl-cross-make
 	+$(call do,MAKE,$(notdir $@),\
 		$(MAKE) -C "$(dir $@)" $(CROSS_TOOLS) \
 	)
@@ -777,7 +792,7 @@ $(build)/$(initrd_dir)/tools.cpio: $(foreach d,$(bin_modules-y),$(build)/$($d_di
 
 
 # List of all modules, excluding the slow to-build modules
-modules-slow := musl musl-cross kernel_headers
+modules-slow := musl musl-cross-make kernel_headers
 module_dirs := $(foreach m,$(filter-out $(modules-slow),$(modules-y)),$($m_dir))
 
 echo_modules:
@@ -791,15 +806,20 @@ modules.clean:
 	done
 
 board.move_untested_to_tested:
-	@echo "NEW_BOARD variable will remove UNTESTED_ prefix from $(BOARD)"
+	@echo "Moving $(BOARD) from UNTESTED to tested status"
 	@NEW_BOARD=$$(echo $(BOARD) | sed 's/^UNTESTED_//'); \
-	echo "Renaming boards/$$BOARD/$$BOARD.config to boards/$$BOARD/$$NEW_BOARD.config"; \
-	mv boards/$$BOARD/$$BOARD.config boards/$$BOARD/$$NEW_BOARD.config; \
-	echo "Renaming boards/$$BOARD to boards/$$NEW_BOARD"; \
-	rm -rf boards/$$NEW_BOARD; \
-	mv boards/$$BOARD boards/$$NEW_BOARD; \
-	echo "Replacing $$BOARD with $$NEW_BOARD in .circleci/config.yml"; \
-	sed -i "s/$$BOARD/$$NEW_BOARD/g" .circleci/config.yml
+	INCLUDE_BOARD=$$(grep "include \$$(pwd)/boards/" boards/$(BOARD)/$(BOARD).config | sed 's/.*boards\/\(.*\)\/.*/\1/'); \
+	NEW_INCLUDE_BOARD=$$(echo $$INCLUDE_BOARD | sed 's/^UNTESTED_//'); \
+	echo "Updating config file: boards/$(BOARD)/$(BOARD).config"; \
+	sed -i 's/$(BOARD)/'$${NEW_BOARD}'/g' boards/$(BOARD)/$(BOARD).config; \
+	sed -i 's/'$$INCLUDE_BOARD'/'$$NEW_INCLUDE_BOARD'/g' boards/$(BOARD)/$(BOARD).config; \
+	echo "Renaming config file to $${NEW_BOARD}.config"; \
+	mv boards/$(BOARD)/$(BOARD).config boards/$(BOARD)/$${NEW_BOARD}.config; \
+	echo "Renaming board directory to $${NEW_BOARD}"; \
+	mv boards/$(BOARD) boards/$${NEW_BOARD}; \
+	echo "Updating .circleci/config.yml"; \
+	sed -i "s/$(BOARD)/$${NEW_BOARD}/g" .circleci/config.yml; \
+	echo "Operation completed for $(BOARD) -> $${NEW_BOARD}"
 
 board.move_unmaintained_to_tested:
 	@echo "NEW_BOARD variable will remove UNMAINTAINED_ prefix from $(BOARD)"
@@ -830,12 +850,36 @@ board.move_tested_to_untested:
 	@echo "NEW_BOARD variable will add UNTESTED_ prefix to $(BOARD)"
 	@NEW_BOARD=UNTESTED_$(BOARD); \
 	rm -rf boards/$${NEW_BOARD}; \
+	echo "changing $(BOARD) name under boards/$(BOARD)/$(BOARD).config to $${NEW_BOARD}"; \
+	sed boards/$(BOARD)/$(BOARD).config 's/$(BOARD)/$${NEW_BOARD}/g'; \
 	echo "Renaming boards/$(BOARD)/$(BOARD).config to boards/$(BOARD)/$${NEW_BOARD}.config"; \
 	mv boards/$(BOARD)/$(BOARD).config boards/$(BOARD)/$${NEW_BOARD}.config; \
 	echo "Renaming boards/$(BOARD) to boards/$${NEW_BOARD}"; \
 	mv boards/$(BOARD) boards/$${NEW_BOARD}; \
-	echo "Replacing $(BOARD) with $${NEW_BOARD} in .circleci/config.yml"; \
+	echo "Replacing $(BOARD) with $${NEW_BOARD} in .circleci/config.yml"; \
 	sed -i "s/$(BOARD)/$${NEW_BOARD}/g" .circleci/config.yml
+
+board.move_tested_to_unmaintained:
+	@echo "Moving $(BOARD) from tested to unmaintained status"
+	@NEW_BOARD=UNMAINTAINED_$(BOARD); \
+	INCLUDE_BOARD=$$(grep "include \$$(pwd)/boards/" boards/$(BOARD)/$(BOARD).config | sed 's/.*boards\/\(.*\)\/.*/\1/'); \
+	NEW_INCLUDE_BOARD=UNMAINTAINED_$${INCLUDE_BOARD}; \
+	echo "Updating config file: boards/$(BOARD)/$(BOARD).config"; \
+	sed -i 's/$(BOARD)/'$${NEW_BOARD}'/g' boards/$(BOARD)/$(BOARD).config; \
+	if [ -n "$$INCLUDE_BOARD" ]; then \
+		sed -i 's/'$$INCLUDE_BOARD'/'$$NEW_INCLUDE_BOARD'/g' boards/$(BOARD)/$(BOARD).config; \
+	fi; \
+	echo "Creating unmaintained_boards directory if it doesn't exist"; \
+	mkdir -p unmaintained_boards/$${NEW_BOARD}; \
+	echo "Moving and renaming config file to unmaintained_boards/$${NEW_BOARD}/$${NEW_BOARD}.config"; \
+	mv boards/$(BOARD)/$(BOARD).config unmaintained_boards/$${NEW_BOARD}/$${NEW_BOARD}.config; \
+	echo "Moving board directory contents to unmaintained_boards/$${NEW_BOARD}"; \
+	mv boards/$(BOARD)/* unmaintained_boards/$${NEW_BOARD}/; \
+	rmdir boards/$(BOARD); \
+	echo "Updating .circleci/config.yml"; \
+	sed -i "s/$(BOARD)/$${NEW_BOARD}/g" .circleci/config.yml; \
+	echo "Operation completed for $(BOARD) -> $${NEW_BOARD}"; \
+	echo "Please manually review and remove any unnecessary entries in .circleci/config.yml"
 
 # Inject a GPG key into the image - this is most useful when testing in qemu,
 # since we can't reflash the firmware in qemu to update the keychain.  Instead,

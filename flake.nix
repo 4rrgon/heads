@@ -87,6 +87,8 @@
         ruby
         sudo # ( °-° )
         upx
+        binwalk # Extract all components of a binary
+        uefi-firmware-parser #Parse and extract further hidden UEFI blobs from binaries
       ];
     in {
       # The development shell includes all the dependencies.
@@ -137,9 +139,17 @@
             -e ACLOCAL_PATH \
             ${self.devShell.${system}} >/devenv.sh
 
-          # Git configuration for safe directory access.
-          printf '[safe]\n\tdirectory = *\n' >/.gitconfig
           mkdir /tmp; # Temporary directory for various operations.
+          chmod 1777 /tmp
+
+          # Ensure /etc/passwd and /etc/group exist with root entries
+          echo "root:x:0:0:root:/root:/bin/bash" > /etc/passwd
+          echo "root:x:0:" > /etc/group
+          mkdir -p /root
+          chmod 700 /root
+
+          # Git configuration for safe directory access.
+          echo -e '[safe]\n\tdirectory = *\n' > /root/.gitconfig
         '';
       };
     });
